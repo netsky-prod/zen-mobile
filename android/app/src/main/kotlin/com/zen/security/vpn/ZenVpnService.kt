@@ -1,0 +1,285 @@
+package com.zen.security.vpn
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import android.net.VpnService
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.util.Log
+import com.zen.security.MainActivity
+import io.nekohasekai.libbox.BoxService
+import io.nekohasekai.libbox.CommandServer
+import io.nekohasekai.libbox.CommandServerHandler
+import io.nekohasekai.libbox.Libbox
+import io.nekohasekai.libbox.PlatformInterface
+import io.nekohasekai.libbox.TunOptions
+import kotlinx.coroutines.*
+import org.json.JSONObject
+
+/**
+ * Zen VPN Service using libbox (sing-box)
+ */
+class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
+    
+    companion object {
+        private const val TAG = "ZenVpnService"
+        private const val NOTIFICATION_ID = 1
+        private const val CHANNEL_ID = "zen_vpn_channel"
+        
+        var instance: ZenVpnService? = null
+        var isRunning = false
+    }
+    
+    private var vpnInterface: ParcelFileDescriptor? = null
+    private var boxService: BoxService? = null
+    private var commandServer: CommandServer? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    private var currentConfig: String = ""
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        createNotificationChannel()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            "STOP" -> {
+                stopVpn()
+                return START_NOT_STICKY
+            }
+            else -> {
+                val config = intent?.getStringExtra("config")
+                if (config != null) {
+                    currentConfig = config
+                    startVpn()
+                }
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun startVpn() {
+        if (isRunning) {
+            Log.w(TAG, "VPN already running")
+            return
+        }
+        
+        scope.launch {
+            try {
+                // Start foreground service
+                startForeground(NOTIFICATION_ID, createNotification())
+                
+                // Initialize libbox
+                val options = Libbox.newSetupOptions()
+                options.basePath = filesDir.absolutePath
+                options.workingPath = cacheDir.absolutePath
+                options.tempPath = cacheDir.absolutePath
+                
+                Libbox.setup(options)
+                
+                // Create box service with config
+                boxService = Libbox.newService(currentConfig, this@ZenVpnService)
+                
+                // Start command server for traffic stats
+                commandServer = Libbox.newCommandServer(this@ZenVpnService, 50)
+                commandServer?.start()
+                
+                // Start the box service
+                boxService?.start()
+                
+                isRunning = true
+                Log.i(TAG, "VPN started successfully with libbox")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start VPN: ${e.message}", e)
+                stopVpn()
+            }
+        }
+    }
+
+    private fun stopVpn() {
+        scope.launch {
+            try {
+                boxService?.close()
+                boxService = null
+                
+                commandServer?.close()
+                commandServer = null
+                
+                vpnInterface?.close()
+                vpnInterface = null
+                
+                isRunning = false
+                
+                Log.i(TAG, "VPN stopped")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping VPN: ${e.message}", e)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        stopVpn()
+        scope.cancel()
+        instance = null
+        super.onDestroy()
+    }
+
+    override fun onRevoke() {
+        stopVpn()
+        super.onRevoke()
+    }
+
+    // PlatformInterface implementation
+    
+    override fun openTun(options: TunOptions): Int {
+        val builder = Builder()
+            .setSession("Zen Security")
+            .setMtu(options.mtu)
+        
+        // Add addresses
+        for (i in 0 until options.getInet4AddressCount()) {
+            val addr = options.getInet4Address(i)
+            builder.addAddress(addr.address, addr.prefix)
+        }
+        for (i in 0 until options.getInet6AddressCount()) {
+            val addr = options.getInet6Address(i)
+            builder.addAddress(addr.address, addr.prefix)
+        }
+        
+        // Add routes
+        for (i in 0 until options.getInet4RouteAddressCount()) {
+            val route = options.getInet4RouteAddress(i)
+            builder.addRoute(route.address, route.prefix)
+        }
+        for (i in 0 until options.getInet6RouteAddressCount()) {
+            val route = options.getInet6RouteAddress(i)
+            builder.addRoute(route.address, route.prefix)
+        }
+        
+        // Add DNS servers
+        for (i in 0 until options.dnsServerAddressCount) {
+            builder.addDnsServer(options.getDnsServerAddress(i))
+        }
+        
+        // Exclude our app to prevent loops
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to exclude app: ${e.message}")
+        }
+        
+        vpnInterface = builder.establish()
+        return vpnInterface?.fd ?: -1
+    }
+
+    override fun closeTun() {
+        vpnInterface?.close()
+        vpnInterface = null
+    }
+
+    override fun writeLog(message: String) {
+        Log.i(TAG, message)
+    }
+
+    override fun useProcFS(): Boolean = false
+    
+    override fun findConnectionOwner(
+        ipProtocol: Int,
+        sourceAddress: String,
+        sourcePort: Int,
+        destinationAddress: String,
+        destinationPort: Int
+    ): Int = -1
+
+    override fun packageNameByUid(uid: Int): String = ""
+    
+    override fun uidByPackageName(packageName: String): Int = -1
+
+    override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
+    
+    override fun autoDetectInterfaceControl(fd: Int) {
+        protect(fd)
+    }
+
+    override fun usePlatformDefaultInterfaceMonitor(): Boolean = false
+    
+    override fun usePlatformInterfaceGetter(): Boolean = false
+
+    override fun getInterfaces(): String = "[]"
+
+    override fun underNetworkExtension(): Boolean = false
+
+    override fun clearDNSCache() {}
+
+    // CommandServerHandler implementation
+    
+    override fun serviceReload() {
+        // Reload service if needed
+    }
+
+    override fun getSystemProxyStatus(): io.nekohasekai.libbox.SystemProxyStatus? = null
+
+    override fun setSystemProxyEnabled(enabled: Boolean) {}
+
+    override fun postServiceClose() {
+        stopVpn()
+    }
+
+    // Notification
+    
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "VPN Service",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Zen Security VPN connection status"
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun createNotification(): Notification {
+        val intent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }.apply {
+            setContentTitle("Zen Security")
+            setContentText("VPN Connected")
+            setSmallIcon(android.R.drawable.ic_lock_lock)
+            setContentIntent(pendingIntent)
+            setOngoing(true)
+        }.build()
+    }
+    
+    // Traffic stats
+    fun getTrafficStats(): Map<String, Long> {
+        return try {
+            val status = commandServer?.serviceStatus
+            mapOf(
+                "rx" to (status?.downlink ?: 0L),
+                "tx" to (status?.uplink ?: 0L)
+            )
+        } catch (e: Exception) {
+            mapOf("rx" to 0L, "tx" to 0L)
+        }
+    }
+}

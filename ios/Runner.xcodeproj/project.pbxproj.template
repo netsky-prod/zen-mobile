@@ -1,0 +1,38 @@
+/*
+ * iOS Project Configuration Notes
+ *
+ * To complete iOS setup, you need to:
+ *
+ * 1. Open the project in Xcode on a Mac
+ * 
+ * 2. Add the PacketTunnel extension target:
+ *    - File > New > Target > Network Extension
+ *    - Choose "Packet Tunnel Provider"
+ *    - Bundle ID: com.zen.security.PacketTunnel
+ *
+ * 3. Configure App Groups:
+ *    - Add "group.com.zen.security" to both targets
+ *    - This allows sharing data between app and extension
+ *
+ * 4. Add Network Extension capability:
+ *    - Select Runner target
+ *    - Signing & Capabilities > + Capability > Network Extensions
+ *    - Enable "Packet Tunnel"
+ *
+ * 5. Add libbox.xcframework:
+ *    - Build libbox for iOS: make lib_ios
+ *    - Drag Libbox.xcframework into Xcode
+ *    - Add to both targets
+ *
+ * 6. Configure entitlements:
+ *    - Runner.entitlements needs:
+ *      - com.apple.developer.networking.networkextension
+ *      - com.apple.security.application-groups
+ *    - PacketTunnel.entitlements needs the same
+ *
+ * 7. For distribution:
+ *    - You need an Apple Developer account
+ *    - Network Extension requires special entitlements from Apple
+ *    - For personal use, sideloading via AltStore works
+ */
+
