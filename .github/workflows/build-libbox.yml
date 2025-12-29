@@ -1,0 +1,72 @@
+name: Build libbox.aar
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-libbox.yml'
+
+jobs:
+  build-libbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install gomobile
+        run: |
+          go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.10
+          go install github.com/sagernet/gomobile/cmd/gobind@v0.1.10
+          gomobile init
+
+      - name: Install Android NDK
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.1.8937393"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.1.8937393" >> $GITHUB_ENV
+
+      - name: Clone sing-box
+        run: |
+          git clone --depth=1 --branch=v1.10.0 https://github.com/SagerNet/sing-box.git /tmp/sing-box
+
+      - name: Build libbox.aar
+        run: |
+          cd /tmp/sing-box
+
+          # Build tags for features
+          TAGS="with_gvisor,with_quic,with_wireguard,with_ech,with_utls,with_clash_api"
+
+          # Build AAR
+          gomobile bind -v \
+            -androidapi=21 \
+            -javapkg=io.nekohasekai \
+            -libname=box \
+            -tags="$TAGS" \
+            -trimpath \
+            -target=android \
+            -o libbox.aar \
+            github.com/sagernet/sing-box/experimental/libbox
+
+          # Copy to our project
+          mkdir -p $GITHUB_WORKSPACE/android/app/libs
+          cp libbox.aar $GITHUB_WORKSPACE/android/app/libs/
+
+      - name: Commit libbox.aar
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add android/app/libs/libbox.aar
+          git diff --staged --quiet || git commit -m "Add libbox.aar (sing-box v1.10.0)
+
+          Built with gomobile from SagerNet/sing-box
+          Features: gvisor, quic, wireguard, ech, utls, clash_api
+
+          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+          Co-Authored-By: Claude <noreply@anthropic.com>"
+          git push

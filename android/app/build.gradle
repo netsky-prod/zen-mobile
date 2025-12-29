@@ -66,13 +66,15 @@ flutter {
 }
 
 repositories {
-    maven { url 'https://jitpack.io' }
+    flatDir {
+        dirs 'libs'
+    }
 }
 
 dependencies {
-    // sing-box library for Android
-    implementation 'io.nekohasekai:box:1.8.14'
-    
+    // sing-box library for Android (built from source)
+    implementation(name: 'libbox', ext: 'aar')
+
     // Coroutines for async operations
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 }
