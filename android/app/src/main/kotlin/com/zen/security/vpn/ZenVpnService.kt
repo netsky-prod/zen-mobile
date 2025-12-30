@@ -13,31 +13,33 @@ import com.zen.security.MainActivity
 import io.nekohasekai.libbox.BoxService
 import io.nekohasekai.libbox.CommandServer
 import io.nekohasekai.libbox.CommandServerHandler
+import io.nekohasekai.libbox.InterfaceUpdateListener
 import io.nekohasekai.libbox.Libbox
+import io.nekohasekai.libbox.NetworkInterfaceIterator
 import io.nekohasekai.libbox.PlatformInterface
 import io.nekohasekai.libbox.TunOptions
 import kotlinx.coroutines.*
 import org.json.JSONObject
 
 /**
- * Zen VPN Service using libbox (sing-box)
+ * Zen VPN Service using libbox (sing-box v1.10+)
  */
 class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
-    
+
     companion object {
         private const val TAG = "ZenVpnService"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "zen_vpn_channel"
-        
+
         var instance: ZenVpnService? = null
         var isRunning = false
     }
-    
+
     private var vpnInterface: ParcelFileDescriptor? = null
     private var boxService: BoxService? = null
     private var commandServer: CommandServer? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    
+
     private var currentConfig: String = ""
 
     override fun onCreate() {
@@ -68,33 +70,33 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             Log.w(TAG, "VPN already running")
             return
         }
-        
+
         scope.launch {
             try {
                 // Start foreground service
                 startForeground(NOTIFICATION_ID, createNotification())
-                
-                // Initialize libbox
-                val options = Libbox.newSetupOptions()
-                options.basePath = filesDir.absolutePath
-                options.workingPath = cacheDir.absolutePath
-                options.tempPath = cacheDir.absolutePath
-                
-                Libbox.setup(options)
-                
+
+                // Initialize libbox with new API
+                Libbox.setup(
+                    filesDir.absolutePath,
+                    cacheDir.absolutePath,
+                    cacheDir.absolutePath,
+                    false
+                )
+
                 // Create box service with config
                 boxService = Libbox.newService(currentConfig, this@ZenVpnService)
-                
+
                 // Start command server for traffic stats
                 commandServer = Libbox.newCommandServer(this@ZenVpnService, 50)
                 commandServer?.start()
-                
+
                 // Start the box service
                 boxService?.start()
-                
+
                 isRunning = true
                 Log.i(TAG, "VPN started successfully with libbox")
-                
+
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start VPN: ${e.message}", e)
                 stopVpn()
@@ -107,15 +109,15 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             try {
                 boxService?.close()
                 boxService = null
-                
+
                 commandServer?.close()
                 commandServer = null
-                
+
                 vpnInterface?.close()
                 vpnInterface = null
-                
+
                 isRunning = false
-                
+
                 Log.i(TAG, "VPN stopped")
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -137,52 +139,56 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         super.onRevoke()
     }
 
-    // PlatformInterface implementation
-    
+    // PlatformInterface implementation for libbox v1.10+
+
     override fun openTun(options: TunOptions): Int {
         val builder = Builder()
             .setSession("Zen Security")
             .setMtu(options.mtu)
-        
-        // Add addresses
-        for (i in 0 until options.getInet4AddressCount()) {
-            val addr = options.getInet4Address(i)
-            builder.addAddress(addr.address, addr.prefix)
+
+        // Add IPv4 addresses using iterator
+        val inet4Iterator = options.getInet4Address()
+        while (inet4Iterator.hasNext()) {
+            val addr = inet4Iterator.next()
+            builder.addAddress(addr.address(), addr.prefix())
         }
-        for (i in 0 until options.getInet6AddressCount()) {
-            val addr = options.getInet6Address(i)
-            builder.addAddress(addr.address, addr.prefix)
+
+        // Add IPv6 addresses using iterator
+        val inet6Iterator = options.getInet6Address()
+        while (inet6Iterator.hasNext()) {
+            val addr = inet6Iterator.next()
+            builder.addAddress(addr.address(), addr.prefix())
         }
-        
-        // Add routes
-        for (i in 0 until options.getInet4RouteAddressCount()) {
-            val route = options.getInet4RouteAddress(i)
-            builder.addRoute(route.address, route.prefix)
+
+        // Add IPv4 routes using iterator
+        val inet4RouteIterator = options.getInet4RouteAddress()
+        while (inet4RouteIterator.hasNext()) {
+            val route = inet4RouteIterator.next()
+            builder.addRoute(route.address(), route.prefix())
         }
-        for (i in 0 until options.getInet6RouteAddressCount()) {
-            val route = options.getInet6RouteAddress(i)
-            builder.addRoute(route.address, route.prefix)
+
+        // Add IPv6 routes using iterator
+        val inet6RouteIterator = options.getInet6RouteAddress()
+        while (inet6RouteIterator.hasNext()) {
+            val route = inet6RouteIterator.next()
+            builder.addRoute(route.address(), route.prefix())
         }
-        
-        // Add DNS servers
-        for (i in 0 until options.dnsServerAddressCount) {
-            builder.addDnsServer(options.getDnsServerAddress(i))
+
+        // Add DNS servers using iterator
+        val dnsIterator = options.getDNSServerAddress()
+        while (dnsIterator.hasNext()) {
+            builder.addDnsServer(dnsIterator.next())
         }
-        
+
         // Exclude our app to prevent loops
         try {
             builder.addDisallowedApplication(packageName)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to exclude app: ${e.message}")
         }
-        
+
         vpnInterface = builder.establish()
         return vpnInterface?.fd ?: -1
-    }
-
-    override fun closeTun() {
-        vpnInterface?.close()
-        vpnInterface = null
     }
 
     override fun writeLog(message: String) {
@@ -190,7 +196,7 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     override fun useProcFS(): Boolean = false
-    
+
     override fun findConnectionOwner(
         ipProtocol: Int,
         sourceAddress: String,
@@ -200,27 +206,39 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     ): Int = -1
 
     override fun packageNameByUid(uid: Int): String = ""
-    
+
     override fun uidByPackageName(packageName: String): Int = -1
 
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
-    
+
     override fun autoDetectInterfaceControl(fd: Int) {
         protect(fd)
     }
 
     override fun usePlatformDefaultInterfaceMonitor(): Boolean = false
-    
+
+    override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        // Not implemented - using platform auto detect
+    }
+
+    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        // Not implemented - using platform auto detect
+    }
+
     override fun usePlatformInterfaceGetter(): Boolean = false
 
-    override fun getInterfaces(): String = "[]"
+    override fun getInterfaces(): NetworkInterfaceIterator? = null
 
     override fun underNetworkExtension(): Boolean = false
 
+    override fun includeAllNetworks(): Boolean = false
+
     override fun clearDNSCache() {}
 
+    override fun readWIFIState(): io.nekohasekai.libbox.WIFIState? = null
+
     // CommandServerHandler implementation
-    
+
     override fun serviceReload() {
         // Reload service if needed
     }
@@ -234,7 +252,7 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     // Notification
-    
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -255,7 +273,7 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             this, 0, intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        
+
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -269,11 +287,11 @@ class ZenVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             setOngoing(true)
         }.build()
     }
-    
+
     // Traffic stats
     fun getTrafficStats(): Map<String, Long> {
         return try {
-            val status = commandServer?.serviceStatus
+            val status = boxService?.status()
             mapOf(
                 "rx" to (status?.downlink ?: 0L),
                 "tx" to (status?.uplink ?: 0L)
